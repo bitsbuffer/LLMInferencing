@@ -179,6 +179,12 @@ cheapest per token despite higher $/hr — **measure before committing** (LAB 14
   Qwen3.8 recipe** [V recipes.vllm.ai/Qwen/Qwen3.8-27B].
 - [ ] Upload `Qwen3.8-27B-FP8` to S3; serve via `--load-format runai_streamer s3://…` (A10) or
   Mountpoint-S3 CSI; EBS scratch for warm weights; record "Loading weights took".
+  **No FSx-for-Lustre needed at this scale** — Run:ai Model Streamer (NVIDIA, not an AWS
+  service) streams S3 → GPU concurrently (~15 GB model ready in ~23 s from S3 at conc-32 on
+  g5.12xlarge; scale ≈ 40–60 s for our ~30 GB). **Lustre + GPUDirect Storage** (via
+  `fastsafetensors`, per-client 1200 Gbps, 405B-FP8: 18 min → 6.4 s) is the phase-2/big-model
+  tool: multi-node TP, EFA plumbing + GDS driver + pre-sharded checkpoints required — and
+  beware naive vLLM-on-Lustre mmap (#24469).
 
 **8. Deploy vLLM (1 GPU)**
 - [ ] Deployment: `nvidia.com/gpu: 1` + toleration; args per §2 D7 (`--kv-cache-dtype fp8`,

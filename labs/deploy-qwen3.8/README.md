@@ -82,7 +82,12 @@ aws iam create-role --role-name vllm-s3-read-infer-lab  # + inline s3:GetObject 
 aws eks create-pod-identity-association --cluster-name infer-lab \
   --namespace vllm --service-account vllm --role-arn arn:aws:iam::<ACCOUNT>:role/vllm-s3-read-infer-lab
 ```
-(EFS/Mountpoint not needed — runai_streamer reads `s3://` directly, A10.)
+(EFS/Mountpoint not needed — runai_streamer reads `s3://` directly, A10.
+**Lustre?** No — FSx-for-Lustre + GPUDirect Storage is a *big-model / multi-node-TP* play
+(405B: 18 min → 6.4 s via fastsafetensors GDS; needs EFA plumbing + GDS driver + pre-sharded
+checkpoints). For a ~30 GB FP8 model on one GPU, Run:ai Model Streamer from S3 gives engine
+readiness in ~20–60 s. Revisit only at phase-2 (design §8) or 405B-class models. Beware the
+naive-vLLM-on-Lustre mmap trap (#24469: 94 min → 14 min *with* eager load).)
 
 ## 5. Deploy vLLM (1 GPU)
 
