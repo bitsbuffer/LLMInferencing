@@ -1,0 +1,100 @@
+# vLLM serving Deployment — Qwen3.8-27B-FP8, 1 GPU/replica (design §2 D7 + §5 step 8).
+# Image tag: PIN from the Qwen3.8 recipe [V recipes.vllm.ai/Qwen/Qwen3.8-27B] — the arch needs
+# a recent vLLM (NVFP4 card cites >=0.26.1-dev lineage). Placeholder below uses latest.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm
+  namespace: vllm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-8-27b
+  namespace: vllm
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # keep capacity during rollouts
+  selector:
+    matchLabels: { app: vllm-qwen3-8-27b }
+  template:
+    metadata:
+      labels: { app: vllm-qwen3-8-27b }
+      annotations:
+        # Baseline pods resist Karpenter voluntary disruption (A9). REMOVE on burst/spot replicas.
+        karpenter.sh/do-not-disrupt: "true"
+    spec:
+      serviceAccountName: vllm                           # S3 read via Pod Identity (s3-weights.sh)
+      terminationGracePeriodSeconds: 600                 # drain before weight loss
+      nodeSelector:
+        karpenter.k8s.aws/instance-family: g7e           # tier-2 (96 GB). Switch to g6e for pilot.
+        karpenter.k8s.aws/instance-gpu-count: "1"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest                # [V] pin per Qwen3.8 recipe
+          imagePullPolicy: IfNotPresent
+          args:
+            - --model
+            - s3://infer-lab-weights/qwen3.8-27b-fp8     # runai_streamer reads S3 directly (A10)
+            - --served-model-name
+            - qwen3.8-27b
+            - --load-format
+            - runai_streamer
+            - --kv-cache-dtype
+            - fp8                                        # D2: calibrated FP8 KV
+            - --speculative-config
+            - '{"method":"mtp","num_speculative_tokens":2}'   # D7: native MTP head (A/B me)
+            - --max-num-batched-tokens
+            - "8192"                                     # explicit (2048 = test default, E3)
+            - --max-num-seqs
+            - "64"                                       # tune vs TPOT p99 (design §3)
+            - --gpu-memory-utilization
+            - "0.92"                                     # new V1 default, explicit (E2)
+            - --enable-prefix-caching                    # E4 (V1 default; explicit for clarity)
+            # --- scale-to-zero eval knobs (enable later; needs the env var below) ---
+            # - --enable-sleep-mode
+            - --port
+            - "8000"
+          env:
+            - name: VLLM_SERVER_DEV_MODE                 # gates /sleep,/wake_up endpoints (A10)
+              value: "1"
+            # - name: HF_TOKEN                          # only if serving straight from HF hub
+            #   valueFrom:
+            #     secretKeyRef: { name: hf-token, key: hf-token }
+          resources:
+            requests: { cpu: "6", memory: 48Gi, nvidia.com/gpu: "1" }
+            limits: { nvidia.com/gpu: "1" }
+          volumeMounts:
+            - { name: dshm, mountPath: /dev/shm }        # NCCL/allocations headroom
+          ports: [{ containerPort: 8000, name: http }]
+          startupProbe:                                  # weights load from S3 — be generous
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 60                         # up to 10 min
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 16Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-qwen3-8-27b
+  namespace: vllm
+spec:
+  # With 1 baseline replica we allow voluntary eviction only when a replacement is up (maxSurge=1).
+  maxUnavailable: 0
+  selector: { matchLabels: { app: vllm-qwen3-8-27b } }

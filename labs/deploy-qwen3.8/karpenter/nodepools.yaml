@@ -1,0 +1,123 @@
+# Small CPU NodePool so add-on/system pods always have a home (cheap, consolidates to 1 node).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: system-cpu
+spec:
+  template:
+    metadata:
+      labels: { pool: system-cpu }
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: al2023-nvidia
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: [c, m]
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["2", "4"]
+      expireAfter: 720h                    # 30d node refresh
+  limits: { cpu: "8" }
+  disruption:
+    consolidationPolicy: WhenEmptyOrViolates
+    consolidateAfter: 1m
+---
+# GPU NodePool — ON-DEMAND baseline (tier-2 capacity: g7e.4xlarge; switch the instanceType list
+# to [g6e.2xlarge] for the pure cost-floor pilot, or add both and rely on Karpenter price
+# ranking via `weights`).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-ondemand
+spec:
+  template:
+    metadata:
+      labels:
+        pool: gpu
+        tier: baseline
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: al2023-nvidia
+      terminationGracePeriod: 24h          # long drain for serving pods (weight reload cost, A9)
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [on-demand]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [g7e]                    # alt: [g6e] for the L40S cost-floor pilot
+        - key: karpenter.k8s.aws/instance-type
+          operator: In
+          values: [g7e.4xlarge, g7e.2xlarge]   # 1×96 GB each; swap to g6e.2xlarge for pilot
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1"]                    # 1 GPU/replica by design (rev-2 decision)
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+  limits:
+    cpu: "64"
+    nvidia.com/gpu: "4"                    # hard cap: 4 GPU replicas in this pool
+  disruption:
+    consolidationPolicy: WhenEmpty         # don't churn serving nodes (A9)
+    consolidateAfter: 1h
+    budgets:
+      - nodes: "1"                         # roll at most one GPU node at a time
+        schedule: "0 0 * * *"
+        duration: 24h
+---
+# GPU NodePool — SPOT burst tier (cheapest shapes; burst replicas only, never baseline pods).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-spot
+spec:
+  template:
+    metadata:
+      labels: { pool: gpu, tier: burst }
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: al2023-nvidia
+      terminationGracePeriod: 4h
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: [spot]
+        - key: kubernetes.io/arch
+          operator: In
+          values: [amd64]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: [g7e, g6e]
+        - key: karpenter.k8s.aws/instance-type
+          operator: In
+          values: [g7e.2xlarge, g7e.4xlarge, g6e.2xlarge]
+        - key: karpenter.k8s.aws/instance-gpu-count
+          operator: In
+          values: ["1"]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+        # Burst-only taint: baseline pods DON'T tolerate this; burst deployments do.
+        - key: burst
+          value: "true"
+          effect: NoSchedule
+  limits: { nvidia.com/gpu: "6" }
+  disruption:
+    consolidationPolicy: WhenEmptyOrViolates
+    consolidateAfter: 5m

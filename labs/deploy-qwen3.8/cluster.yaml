@@ -1,0 +1,38 @@
+# eksctl cluster config — EKS 1.36 + required addons (design §5 step 2)
+# GPU capacity is provisioned by Karpenter (karpenter/*.yaml), NOT by a managed node group.
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: infer-lab
+  region: us-east-1
+  version: "1.36"
+
+iam:
+  withOIDC: true
+
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy
+  - name: aws-ebs-csi-driver
+    # EBS CSI via Pod Identity (A1 — no per-addon IRSA churn)
+    podIdentityAssociations:
+      - namespace: kube-system
+        serviceAccountName: ebs-csi-controller-sa
+  - name: eks-pod-identity-agent          # required for all Pod Identity associations below
+  # Optional (pick one weights path; runai_streamer s3:// does NOT need this addon):
+  # - name: aws-mountpoint-s3-csi-driver
+  # Optional (CloudWatch path for DCGM + GPU/EFA metrics, B6):
+  # - name: amazon-cloudwatch-observability
+
+# Add-on pods need at least one node at bootstrap; keep a tiny on-demand CPU MNG.
+managedNodeGroups:
+  - name: mng-system-cpu
+    instanceType: c7g.xlarge            # arm64 — keep addons cheap; switch c7i.xlarge if arch-sensitive
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 2
+    volumeSize: 40
+
+# NOTE (A3/A5): no GPU node groups here. Device plugin/DRA/EFA installs are cluster-level
+# installs owned by karpenter/* manifests + helm commands in the README.

@@ -1,0 +1,41 @@
+# Autoscaling — pick ONE of the two mechanisms.
+# 1) KEDA (provided): scales 1→4 on in-flight requests scraped from vLLM /metrics.
+#    Install: helm repo add kedacore https://kedacore.github.io/charts && \
+#             helm install keda kedacore/keda -n keda --create-namespace
+#    Threshold 40 ≈ tier-2 KV headroom (design §3: ~64 seqs @4k → 40 running leaves headroom).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-qwen3-8-27b
+  namespace: vllm
+spec:
+  scaleTargetRef: { name: vllm-qwen3-8-27b }
+  minReplicaCount: 1
+  maxReplicaCount: 4
+  cooldownPeriod: 600                 # 10 min downscale hysteresis (weight reload cost, A10)
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: sum(vllm:num_requests_running)
+        threshold: "40"
+---
+# 2) HPA + prometheus-adapter (alternative; only if you already run the adapter):
+#    apiVersion: autoscaling/v2
+#    kind: HorizontalPodAutoscaler
+#    metadata: { name: vllm-qwen3-8-27b, namespace: vllm }
+#    spec:
+#      scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: vllm-qwen3-8-27b }
+#      minReplicas: 1
+#      maxReplicas: 4
+#      behavior:
+#        scaleDown: { stabilizationWindowSeconds: 600 }
+#      metrics:
+#        - type: Pods
+#          pods:
+#            metric: { name: vllm_num_requests_running }   # as exposed by the adapter
+#            target: { type: AverageValue, averageValue: "40" }
+#
+# Burst replicas on the SPOT NodePool: create a second Deployment (copy) with
+#   replicas: 0 + KEDA min 0/max 2 + nodeSelector tier=burst + toleration key burst=true
+# and REMOVE karpenter.sh/do-not-disrupt (A9: baseline=on-demand protected, burst=spot).
